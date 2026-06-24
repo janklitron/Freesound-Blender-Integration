@@ -1,7 +1,7 @@
 bl_info = {
     "name": "VSE Freesound Integration",
     "author": "Gemini",
-    "version": (1, 1),
+    "version": (1, 2),
     "blender": (3, 0, 0),
     "location": "Sequence Editor > UI > Freesound",
     "description": "Search, preview, and import Freesound audio directly into the VSE",
@@ -28,8 +28,6 @@ class FreesoundResultItem(bpy.types.PropertyGroup):
     description: bpy.props.StringProperty()
     preview_url: bpy.props.StringProperty()
     download_url: bpy.props.StringProperty()
-    
-    # New Properties for Rating
     rating: bpy.props.FloatProperty()
     num_ratings: bpy.props.IntProperty()
 
@@ -71,6 +69,14 @@ class VSE_Freesound_Settings(bpy.types.PropertyGroup):
         description="Use FFmpeg loudnorm filter to normalize volume",
         default=False
     )
+    
+    # FFmpeg Settings
+    custom_ffmpeg_path: bpy.props.StringProperty(
+        name="FFmpeg Path",
+        description="Leave empty to use system PATH, or select the FFmpeg executable manually",
+        default="",
+        subtype='FILE_PATH'
+    )
 
 class VSE_OT_Freesound_Search(bpy.types.Operator):
     bl_idname = "vse.freesound_search"
@@ -84,7 +90,6 @@ class VSE_OT_Freesound_Search(bpy.types.Operator):
             return {'CANCELLED'}
 
         query = urllib.parse.quote(settings.search_query)
-        # Added avg_rating and num_ratings to requested fields
         url = f"https://freesound.org/apiv2/search/text/?query={query}&sort={settings.sort_by}&fields=id,name,username,description,previews,avg_rating,num_ratings&page_size=15"
         
         req = urllib.request.Request(url)
@@ -102,12 +107,9 @@ class VSE_OT_Freesound_Search(bpy.types.Operator):
                     res.sound_id = str(item.get('id', ''))
                     res.name = item.get('name', 'Unknown')
                     res.author = item.get('username', 'Unknown')
-                    
-                    # Fetch ratings safely
                     res.rating = float(item.get('avg_rating', 0.0))
                     res.num_ratings = int(item.get('num_ratings', 0))
                     
-                    # Clean and truncate description
                     desc = item.get('description', 'No description.')
                     res.description = desc[:150] + "..." if len(desc) > 150 else desc
                     
@@ -133,7 +135,6 @@ class VSE_OT_Freesound_Navigate(bpy.types.Operator):
         if total > 0:
             settings.current_index = (settings.current_index + self.direction) % total
             
-            # Stop preview if navigating
             global _preview_handle
             if _preview_handle:
                 _preview_handle.stop()
@@ -157,13 +158,11 @@ class VSE_OT_Freesound_Preview(bpy.types.Operator):
             self.report({'ERROR'}, "No preview available for this sound.")
             return {'CANCELLED'}
             
-        # Stop existing preview before playing a new one
         if _preview_handle:
             _preview_handle.stop()
             _preview_handle = None
 
         try:
-            # Download temp preview
             temp_dir = tempfile.gettempdir()
             temp_file = os.path.join(temp_dir, f"fs_preview_{item.sound_id}.mp3")
             
@@ -172,7 +171,6 @@ class VSE_OT_Freesound_Preview(bpy.types.Operator):
                 with urllib.request.urlopen(req) as response, open(temp_file, 'wb') as out_file:
                     out_file.write(response.read())
             
-            # Play using Blender's aud module
             device = aud.Device()
             sound = aud.Sound(temp_file)
             _preview_handle = device.play(sound)
@@ -182,7 +180,6 @@ class VSE_OT_Freesound_Preview(bpy.types.Operator):
 
         return {'FINISHED'}
 
-# New Stop Operator
 class VSE_OT_Freesound_Stop(bpy.types.Operator):
     bl_idname = "vse.freesound_stop"
     bl_label = "Stop"
@@ -193,6 +190,16 @@ class VSE_OT_Freesound_Stop(bpy.types.Operator):
         if _preview_handle:
             _preview_handle.stop()
             _preview_handle = None
+        return {'FINISHED'}
+
+class VSE_OT_Freesound_Get_FFmpeg(bpy.types.Operator):
+    bl_idname = "vse.freesound_get_ffmpeg"
+    bl_label = "Download FFmpeg"
+    bl_description = "Opens the official FFmpeg download page in your browser"
+    
+    def execute(self, context):
+        bpy.ops.wm.url_open(url="https://ffmpeg.org/download.html")
+        self.report({'INFO'}, "Opened FFmpeg download page.")
         return {'FINISHED'}
 
 class VSE_OT_Freesound_Add(bpy.types.Operator):
@@ -210,12 +217,10 @@ class VSE_OT_Freesound_Add(bpy.types.Operator):
             self.report({'ERROR'}, "No download link available.")
             return {'CANCELLED'}
 
-        # Setup VSE Context
         if not context.scene.sequence_editor:
             context.scene.sequence_editor_create()
             
         try:
-            # 1. Download HQ Preview to temp folder
             temp_dir = tempfile.gettempdir()
             raw_file = os.path.join(temp_dir, f"fs_raw_{item.sound_id}.mp3")
             final_file = os.path.join(temp_dir, f"fs_final_{item.sound_id}.mp3")
@@ -224,16 +229,18 @@ class VSE_OT_Freesound_Add(bpy.types.Operator):
             with urllib.request.urlopen(req) as response, open(raw_file, 'wb') as out_file:
                 out_file.write(response.read())
             
-            # 2. Process with FFmpeg if needed
             if settings.compression_level > 0 or settings.normalize_volume:
-                cmd = ['ffmpeg', '-y', '-i', raw_file]
+                # Use custom path if provided, otherwise default to system command
+                ffmpeg_bin = bpy.path.abspath(settings.custom_ffmpeg_path) if settings.custom_ffmpeg_path else 'ffmpeg'
+                
+                cmd = [ffmpeg_bin, '-y', '-i', raw_file]
                 
                 if settings.normalize_volume:
                     cmd.extend(['-filter:a', 'loudnorm'])
                 
                 if settings.compression_level > 0:
                     bitrate = int(128 - (1.12 * settings.compression_level))
-                    bitrate = max(16, bitrate) # floor at 16k
+                    bitrate = max(16, bitrate)
                     cmd.extend(['-b:a', f'{bitrate}k'])
                     
                 cmd.append(final_file)
@@ -242,7 +249,6 @@ class VSE_OT_Freesound_Add(bpy.types.Operator):
             else:
                 import_file = raw_file
 
-            # 3. Add to Sequence Editor at current frame
             channel = 1
             frame = context.scene.frame_current
             name_clean = "".join([c for c in item.name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
@@ -257,7 +263,7 @@ class VSE_OT_Freesound_Add(bpy.types.Operator):
             self.report({'INFO'}, f"Added {item.name} to VSE")
             
         except FileNotFoundError:
-            self.report({'ERROR'}, "FFmpeg not found. Please ensure FFmpeg is installed and in your system PATH.")
+            self.report({'ERROR'}, "FFmpeg not found. Check your system PATH or set the Custom FFmpeg Path below.")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to add sound: {str(e)}")
 
@@ -274,7 +280,6 @@ class VSE_PT_Freesound(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.freesound_settings
 
-        # Authentication & Search
         box = layout.box()
         box.prop(settings, "api_key", icon='KEY_HLT')
         box.prop(settings, "search_query", icon='VIEWZOOM')
@@ -283,12 +288,10 @@ class VSE_PT_Freesound(bpy.types.Panel):
         row.prop(settings, "sort_by", text="")
         row.operator("vse.freesound_search", text="Search", icon='FILE_REFRESH')
 
-        # Results Browser
         if len(settings.results) > 0:
             layout.separator()
             item = settings.results[settings.current_index]
             
-            # Navigation Header
             nav_row = layout.row(align=True)
             prev_op = nav_row.operator("vse.freesound_navigate", text="", icon='TRIA_LEFT')
             prev_op.direction = -1
@@ -298,16 +301,13 @@ class VSE_PT_Freesound(bpy.types.Panel):
             next_op = nav_row.operator("vse.freesound_navigate", text="", icon='TRIA_RIGHT')
             next_op.direction = 1
             
-            # Display Details
             res_box = layout.box()
             res_box.label(text=item.name, icon='SOUND')
             res_box.label(text=f"By: {item.author}", icon='USER')
             
-            # Rating UI Display
             star_icon = 'SOLO_ON' if item.rating >= 1.0 else 'SOLO_OFF'
             res_box.label(text=f"Rating: {item.rating:.1f} / 5.0  ({item.num_ratings} votes)", icon=star_icon)
             
-            # Wrap description into chunks
             desc_col = res_box.column()
             words = item.description.split()
             line = ""
@@ -320,13 +320,11 @@ class VSE_PT_Freesound(bpy.types.Panel):
             if line:
                 desc_col.label(text=line)
 
-            # Updated Playback Controls (Side by Side Play/Stop)
             play_row = layout.row(align=True)
             play_row.scale_y = 1.2
             play_row.operator("vse.freesound_preview", text="Play Audio", icon='PLAY')
             play_row.operator("vse.freesound_stop", text="Stop", icon='PAUSE')
             
-            # Download / Add settings
             layout.separator()
             layout.label(text="Import Settings:")
             
@@ -337,6 +335,13 @@ class VSE_PT_Freesound(bpy.types.Panel):
             dl_row = dl_box.row()
             dl_row.scale_y = 1.5
             dl_row.operator("vse.freesound_add", icon='IMPORT')
+            
+        # FFmpeg Configuration Section
+        layout.separator()
+        ff_box = layout.box()
+        ff_box.label(text="FFmpeg Configuration:", icon='PREFERENCES')
+        ff_box.prop(settings, "custom_ffmpeg_path", text="Executable")
+        ff_box.operator("vse.freesound_get_ffmpeg", icon='URL')
 
 def register():
     bpy.utils.register_class(FreesoundResultItem)
@@ -347,12 +352,14 @@ def register():
     bpy.utils.register_class(VSE_OT_Freesound_Navigate)
     bpy.utils.register_class(VSE_OT_Freesound_Preview)
     bpy.utils.register_class(VSE_OT_Freesound_Stop)
+    bpy.utils.register_class(VSE_OT_Freesound_Get_FFmpeg)
     bpy.utils.register_class(VSE_OT_Freesound_Add)
     bpy.utils.register_class(VSE_PT_Freesound)
 
 def unregister():
     bpy.utils.unregister_class(VSE_PT_Freesound)
     bpy.utils.unregister_class(VSE_OT_Freesound_Add)
+    bpy.utils.unregister_class(VSE_OT_Freesound_Get_FFmpeg)
     bpy.utils.unregister_class(VSE_OT_Freesound_Stop)
     bpy.utils.unregister_class(VSE_OT_Freesound_Preview)
     bpy.utils.unregister_class(VSE_OT_Freesound_Navigate)
